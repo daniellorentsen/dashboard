@@ -1,8 +1,10 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
 import type { Invoice, InvoiceLine } from '@/lib/rackbeat'
 import KPICard from './KPICard'
+import MultiSelect from './MultiSelect'
 import RevenueChart from './RevenueChart'
 import TopTable from './TopTable'
 
@@ -30,9 +32,9 @@ function lineItemNumber(line: InvoiceLine) {
   return line.child_id ?? line.item?.number ?? null
 }
 
-function lineMatchesItemFilter(line: InvoiceLine, itemGroup: string, itemNumber: string) {
-  if (itemGroup && lineGroup(line) !== itemGroup) return false
-  if (itemNumber && lineItemNumber(line) !== itemNumber) return false
+function lineMatchesItemFilter(line: InvoiceLine, itemGroups: string[], itemNumbers: string[]) {
+  if (itemGroups.length > 0 && !itemGroups.includes(lineGroup(line) ?? '')) return false
+  if (itemNumbers.length > 0 && !itemNumbers.includes(lineItemNumber(line) ?? '')) return false
   return true
 }
 
@@ -64,28 +66,38 @@ function aggregateByInvoice(invoices: Invoice[], keyFn: (inv: Invoice) => string
 function aggregateByLine(
   invoices: Invoice[],
   keyFn: (inv: Invoice) => string,
-  itemGroup: string,
-  itemNumber: string,
+  itemGroups: string[],
+  itemNumbers: string[],
 ): AggRow[] {
-  const map = new Map<string, { omsætning: number; profit: number; antal: number; enheder: number }>()
+  const map = new Map<string, { omsætning: number; profit: number; enheder: number; invoiceNums: Set<number> }>()
   for (const inv of invoices) {
     const key = keyFn(inv)
     if (!key) continue
     const rate = inv.currency_rate ?? 1
     for (const line of inv.lines ?? []) {
-      if (!lineMatchesItemFilter(line, itemGroup, itemNumber)) continue
-      const cur = map.get(key) ?? { omsætning: 0, profit: 0, antal: 0, enheder: 0 }
+      if (!lineMatchesItemFilter(line, itemGroups, itemNumbers)) continue
+      const cur = map.get(key) ?? { omsætning: 0, profit: 0, enheder: 0, invoiceNums: new Set<number>() }
       const lineRevenue = line.line_total * rate
       const lineProfit = (line.line_total - line.quantity * line.item_cost_price) * rate
+      cur.invoiceNums.add(inv.number)
       map.set(key, {
         omsætning: cur.omsætning + lineRevenue,
         profit: cur.profit + lineProfit,
-        antal: cur.antal + 1,
         enheder: cur.enheder + (line.quantity ?? 0),
+        invoiceNums: cur.invoiceNums,
       })
     }
   }
-  return toRows(map)
+  return Array.from(map.entries())
+    .map(([name, v]) => ({
+      name,
+      omsætning: v.omsætning,
+      profit: v.profit,
+      profitPct: v.omsætning > 0 ? (v.profit / v.omsætning) * 100 : 0,
+      antal: v.invoiceNums.size,
+      enheder: v.enheder,
+    }))
+    .sort((a, b) => b.omsætning - a.omsætning)
 }
 
 function toRows(map: Map<string, { omsætning: number; profit: number; antal: number; enheder: number }>): AggRow[] {
@@ -99,13 +111,12 @@ function toRows(map: Map<string, { omsætning: number; profit: number; antal: nu
       enheder: v.enheder,
     }))
     .sort((a, b) => b.omsætning - a.omsætning)
-    .slice(0, 20)
 }
 
 // Chart data by month
-function byMonth(invoices: Invoice[], itemGroup: string, itemNumber: string) {
+function byMonth(invoices: Invoice[], itemGroups: string[], itemNumbers: string[]) {
   const map = new Map<string, { omsætning: number; profit: number }>()
-  const useLinelevel = itemGroup || itemNumber
+  const useLinelevel = itemGroups.length > 0 || itemNumbers.length > 0
 
   for (const inv of invoices) {
     const label = inv.invoice_date?.slice(0, 7) ?? 'ukendt'
@@ -119,7 +130,7 @@ function byMonth(invoices: Invoice[], itemGroup: string, itemNumber: string) {
       })
     } else {
       for (const line of inv.lines ?? []) {
-        if (!lineMatchesItemFilter(line, itemGroup, itemNumber)) continue
+        if (!lineMatchesItemFilter(line, itemGroups, itemNumbers)) continue
         map.set(label, {
           omsætning: cur.omsætning + line.line_total * rate,
           profit: cur.profit + (line.line_total - line.quantity * line.item_cost_price) * rate,
@@ -148,12 +159,12 @@ export default function Dashboard() {
   const [groupBy, setGroupBy] = useState<GroupBy>('customer')
 
   // Filters
-  const [customerFilter, setCustomerFilter] = useState('')
-  const [customerGroupFilter, setCustomerGroupFilter] = useState('')
-  const [itemGroupFilter, setItemGroupFilter] = useState('')
-  const [itemNumberFilter, setItemNumberFilter] = useState('')
+  const [customerFilter, setCustomerFilter] = useState<string[]>([])
+  const [customerGroupFilter, setCustomerGroupFilter] = useState<string[]>([])
+  const [itemGroupFilter, setItemGroupFilter] = useState<string[]>([])
+  const [itemNumberFilter, setItemNumberFilter] = useState<string[]>([])
 
-  const activeItemFilter = itemGroupFilter || itemNumberFilter
+  const activeItemFilter = itemGroupFilter.length > 0 || itemNumberFilter.length > 0
 
   // ─── Derived filter options ─────────────────────────────────────────────────
 
@@ -169,10 +180,11 @@ export default function Dashboard() {
   const customers = useMemo(() => {
     const s = new Set<string>()
     for (const inv of invoices) {
+      if (customerGroupFilter.length > 0 && !customerGroupFilter.includes(inv.customer?.customer_group?.name ?? '')) continue
       if (inv.customer?.name) s.add(inv.customer.name)
     }
     return Array.from(s).sort()
-  }, [invoices])
+  }, [invoices, customerGroupFilter])
 
   const itemGroups = useMemo(() => {
     const s = new Set<string>()
@@ -192,7 +204,7 @@ export default function Dashboard() {
       for (const line of inv.lines ?? []) {
         const num = lineItemNumber(line)
         if (!num) continue
-        if (itemGroupFilter && lineGroup(line) !== itemGroupFilter) continue
+        if (itemGroupFilter.length > 0 && !itemGroupFilter.includes(lineGroup(line) ?? '')) continue
         map.set(num, line.name ?? num)
       }
     }
@@ -204,8 +216,8 @@ export default function Dashboard() {
   const filtered = useMemo(() => {
     return invoices.filter((inv) => {
       // Kreditnotaer inkluderes som negative værdier (trækkes fra nettoomsætning)
-      if (customerFilter && inv.customer?.name !== customerFilter) return false
-      if (customerGroupFilter && inv.customer?.customer_group?.name !== customerGroupFilter) return false
+      if (customerFilter.length > 0 && !customerFilter.includes(inv.customer?.name ?? '')) return false
+      if (customerGroupFilter.length > 0 && !customerGroupFilter.includes(inv.customer?.customer_group?.name ?? '')) return false
       if (activeItemFilter) {
         const hasMatch = (inv.lines ?? []).some((line) =>
           lineMatchesItemFilter(line, itemGroupFilter, itemNumberFilter)
@@ -303,6 +315,10 @@ export default function Dashboard() {
             <span className="text-white font-bold text-sm tracking-widest uppercase">Niels Thams</span>
             <span className="text-[#C8A96E] text-[10px] tracking-widest uppercase block leading-none">Salgs Dashboard</span>
           </div>
+          <nav className="ml-auto flex gap-6">
+            <span className="text-xs text-[#C8A96E] border-b border-[#C8A96E] uppercase tracking-wide pb-px">Salg</span>
+            <Link href="/lager" className="text-xs text-[#a89070] hover:text-[#C8A96E] transition-colors uppercase tracking-wide">Lager</Link>
+          </nav>
         </div>
       </header>
 
@@ -333,25 +349,21 @@ export default function Dashboard() {
             {/* Customer filters */}
             <div className="flex flex-col gap-1">
               <label className="text-xs font-medium text-[#a89070] uppercase tracking-wide">Kundegruppe</label>
-              <select
+              <MultiSelect
+                options={customerGroups.map((g) => ({ value: g, label: g }))}
                 value={customerGroupFilter}
-                onChange={(e) => { setCustomerGroupFilter(e.target.value); setCustomerFilter('') }}
-                className="rounded-lg border border-[#3d3020] bg-[#1a1410] px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-[#C8A96E]"
-              >
-                <option value="">Alle grupper</option>
-                {customerGroups.map((g) => <option key={g} value={g}>{g}</option>)}
-              </select>
+                onChange={setCustomerGroupFilter}
+                placeholder="Alle grupper"
+              />
             </div>
             <div className="flex flex-col gap-1">
               <label className="text-xs font-medium text-[#a89070] uppercase tracking-wide">Kunde</label>
-              <select
+              <MultiSelect
+                options={customers.map((c) => ({ value: c, label: c }))}
                 value={customerFilter}
-                onChange={(e) => setCustomerFilter(e.target.value)}
-                className="rounded-lg border border-[#3d3020] bg-[#1a1410] px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-[#C8A96E]"
-              >
-                <option value="">Alle kunder</option>
-                {customers.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
+                onChange={setCustomerFilter}
+                placeholder="Alle kunder"
+              />
             </div>
 
             <div className="h-8 w-px bg-[#3d3020]" />
@@ -359,27 +371,21 @@ export default function Dashboard() {
             {/* Item filters */}
             <div className="flex flex-col gap-1">
               <label className="text-xs font-medium text-[#a89070] uppercase tracking-wide">Varegruppe</label>
-              <select
+              <MultiSelect
+                options={itemGroups.map((g) => ({ value: g, label: g }))}
                 value={itemGroupFilter}
-                onChange={(e) => { setItemGroupFilter(e.target.value); setItemNumberFilter('') }}
-                className="rounded-lg border border-[#3d3020] bg-[#1a1410] px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-[#C8A96E]"
-              >
-                <option value="">Alle varegrupper</option>
-                {itemGroups.map((g) => <option key={g} value={g}>{g}</option>)}
-              </select>
+                onChange={setItemGroupFilter}
+                placeholder="Alle varegrupper"
+              />
             </div>
             <div className="flex flex-col gap-1">
               <label className="text-xs font-medium text-[#a89070] uppercase tracking-wide">Varenummer</label>
-              <select
+              <MultiSelect
+                options={itemNumbers.map(([num, name]) => ({ value: num, label: `${num} – ${name}` }))}
                 value={itemNumberFilter}
-                onChange={(e) => setItemNumberFilter(e.target.value)}
-                className="rounded-lg border border-[#3d3020] bg-[#1a1410] px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-[#C8A96E]"
-              >
-                <option value="">Alle varer</option>
-                {itemNumbers.map(([num, name]) => (
-                  <option key={num} value={num}>{num} – {name}</option>
-                ))}
-              </select>
+                onChange={setItemNumberFilter}
+                placeholder="Alle varer"
+              />
             </div>
 
             <button
@@ -394,9 +400,9 @@ export default function Dashboard() {
           {activeItemFilter && (
             <p className="mt-3 text-xs text-[#C8A96E]">
               Tal vises på linje-niveau for{' '}
-              {itemGroupFilter && <span>varegruppe <strong>{itemGroupFilter}</strong></span>}
-              {itemGroupFilter && itemNumberFilter && ' / '}
-              {itemNumberFilter && <span>varenr. <strong>{itemNumberFilter}</strong></span>}
+              {itemGroupFilter.length > 0 && <span>varegruppe <strong>{itemGroupFilter.join(', ')}</strong></span>}
+              {itemGroupFilter.length > 0 && itemNumberFilter.length > 0 && ' / '}
+              {itemNumberFilter.length > 0 && <span>varenr. <strong>{itemNumberFilter.join(', ')}</strong></span>}
             </p>
           )}
         </div>
