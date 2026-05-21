@@ -38,7 +38,7 @@ export default function RevenueChart({ data }: Props) {
           <YAxis tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} tick={{ fontSize: 12, fill: '#a89070' }} />
           <Tooltip
             contentStyle={{ backgroundColor: '#2B2318', border: '1px solid #3d3020', borderRadius: '8px', color: '#e0c99a' }}
-            formatter={(value: number) => formatDKK(value)}
+            formatter={(value) => typeof value === 'number' ? formatDKK(value) : String(value)}
           />
           <Legend wrapperStyle={{ color: '#a89070', fontSize: 12 }} />
           <Line type="monotone" dataKey="omsætning" stroke="#C8A96E" strokeWidth={2} dot={false} />
