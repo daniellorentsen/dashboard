@@ -110,6 +110,20 @@ export type PurchaseOrder = {
   lines: PurchaseOrderLine[]
 }
 
+export type OrderShipmentLine = {
+  id: number
+  child_id: string
+  child_type: string
+  quantity: number
+}
+
+export type OrderShipment = {
+  id: number
+  is_shipped: boolean
+  shipping_date: string | null
+  lines: OrderShipmentLine[]
+}
+
 // ─── Fetchers ─────────────────────────────────────────────────────────────────
 
 export async function fetchInvoices(from: string, to: string): Promise<Invoice[]> {
@@ -181,6 +195,22 @@ export async function fetchPurchaseOrders(): Promise<PurchaseOrder[]> {
   return fetchAllPages<PurchaseOrder>(
     (page) => `${BASE_URL}/purchase-orders?booked=true&limit=100&page=${page}`,
     'purchase_orders',
+    300,
+  )
+}
+
+export async function fetchReceivedPurchaseOrders(from: string): Promise<PurchaseOrder[]> {
+  return fetchAllPages<PurchaseOrder>(
+    (page) => `${BASE_URL}/purchase-orders?booked=true&received=true&from=${from}&limit=100&page=${page}`,
+    'purchase_orders',
+    300,
+  )
+}
+
+export async function fetchShipments(from: string): Promise<OrderShipment[]> {
+  return fetchAllPages<OrderShipment>(
+    (page) => `${BASE_URL}/order-shipments?shipped=true&from=${from}&limit=100&page=${page}`,
+    'order_shipments',
     300,
   )
 }

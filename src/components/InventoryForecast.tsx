@@ -11,11 +11,18 @@ type InventoryData = {
   items: ItemStock[]
   orderLines: Movement[]
   purchaseLines: Movement[]
+  shipmentLines: Movement[]   // actual past shipments
+  receivedLines: Movement[]   // actual past received deliveries
+}
+
+type SalesData = {
+  salesAvg: Record<string, number[]>
+  dailySales: Record<string, Record<string, number>>
+  dailyReceived: Record<string, Record<string, number>>
 }
 
 const DAY_NAMES = ['Søn', 'Man', 'Tir', 'Ons', 'Tor', 'Fre', 'Lør']
 
-// 7 days back + today + 20 days forward = 28 columns
 function makeDates(daysBack = 7, daysForward = 20): string[] {
   const base = new Date()
   return Array.from({ length: daysBack + 1 + daysForward }, (_, i) => {
@@ -35,6 +42,10 @@ function isWeekend(dateStr: string) {
   return day === 0 || day === 6
 }
 
+function localDateStr(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 function heatColor(value: number, max: number): string {
   if (value < 0) return 'hsl(0, 80%, 65%)'
   if (value === 0 || max === 0) return 'hsl(25, 85%, 60%)'
@@ -51,9 +62,10 @@ export default function InventoryForecast() {
   const [groupFilter, setGroupFilter] = useState<string[]>([])
   const [itemFilter, setItemFilter] = useState<string[]>([])
   const [focusDate, setFocusDate] = useState<string>('')
+  const [countDate, setCountDate] = useState<string>('')
   const [forecastOn, setForecastOn] = useState(false)
-  const [salesAvg, setSalesAvg] = useState<Record<string, number[]> | null>(null)
-  const [forecastLoading, setForecastLoading] = useState(false)
+  const [salesData, setSalesData] = useState<SalesData | null>(null)
+  const [salesLoading, setSalesLoading] = useState(false)
 
   const dates = useMemo(() => makeDates(), [])
   const today = new Date().toISOString().slice(0, 10)
@@ -73,25 +85,38 @@ export default function InventoryForecast() {
     }
   }
 
-  useEffect(() => { load() }, [])
-
-  async function loadForecast() {
-    setForecastLoading(true)
+  async function loadSalesData() {
+    setSalesLoading(true)
     try {
       const res = await fetch('/api/salesavg')
       if (!res.ok) throw new Error()
-      setSalesAvg(await res.json())
-      setForecastOn(true)
+      setSalesData(await res.json())
     } finally {
-      setForecastLoading(false)
+      setSalesLoading(false)
     }
   }
 
-  function toggleForecast() {
-    if (forecastLoading) return
-    if (!forecastOn && salesAvg === null) loadForecast()
-    else setForecastOn((v) => !v)
-  }
+  useEffect(() => {
+    load()
+    loadSalesData()
+  }, [])
+
+  // ── Last 3 Fridays not already in the main date window (oldest → newest) ────
+
+  const fridayDates = useMemo(() => {
+    const datesSet = new Set(dates)
+    const result: string[] = []
+    const d = new Date(today + 'T00:00:00')
+    d.setDate(d.getDate() - 1)
+    while (result.length < 3) {
+      if (d.getDay() === 5) {
+        const s = localDateStr(d)
+        if (!datesSet.has(s)) result.push(s)
+      }
+      d.setDate(d.getDate() - 1)
+    }
+    return result.reverse()
+  }, [today, dates])
 
   // ── Merge .UB variants into their base item ─────────────────────────────────
 
@@ -114,10 +139,12 @@ export default function InventoryForecast() {
         return extra ? { ...item, stock_quantity: item.stock_quantity + extra } : item
       })
 
-    const orderLines = data.orderLines.map((l) => ({ ...l, itemNumber: remap(l.itemNumber) }))
+    const orderLines    = data.orderLines.map((l)    => ({ ...l, itemNumber: remap(l.itemNumber) }))
     const purchaseLines = data.purchaseLines.map((l) => ({ ...l, itemNumber: remap(l.itemNumber) }))
+    const shipmentLines = data.shipmentLines.map((l) => ({ ...l, itemNumber: remap(l.itemNumber) }))
+    const receivedLines = data.receivedLines.map((l) => ({ ...l, itemNumber: remap(l.itemNumber) }))
 
-    return { items, orderLines, purchaseLines }
+    return { items, orderLines, purchaseLines, shipmentLines, receivedLines }
   }, [data])
 
   // ── Filter options ──────────────────────────────────────────────────────────
@@ -150,51 +177,80 @@ export default function InventoryForecast() {
     })
   }, [mergedData, groupFilter, itemFilter])
 
-  // ── Movement index: itemNumber → date → { in, out } ────────────────────────
+  // ── Movement indices ────────────────────────────────────────────────────────
 
+  // Future movements (open orders and purchases) for forward projection
   const movIdx = useMemo(() => {
     if (!mergedData) return new Map<string, Record<string, { in: number; out: number }>>()
     const idx = new Map<string, Record<string, { in: number; out: number }>>()
-
     function add(itemNum: string, date: string, key: 'in' | 'out', qty: number) {
       if (!idx.has(itemNum)) idx.set(itemNum, {})
       const m = idx.get(itemNum)!
       if (!m[date]) m[date] = { in: 0, out: 0 }
       m[date][key] += qty
     }
+    for (const l of mergedData.orderLines)   add(l.itemNumber, l.date, 'out', l.qty)
+    for (const l of mergedData.purchaseLines) add(l.itemNumber, l.date, 'in',  l.qty)
+    return idx
+  }, [mergedData])
 
-    for (const l of mergedData.orderLines) add(l.itemNumber, l.date, 'out', l.qty)
-    for (const l of mergedData.purchaseLines) add(l.itemNumber, l.date, 'in', l.qty)
+  // Actual past shipments per item per date (for backward reconstruction)
+  const shipmentIdx = useMemo(() => {
+    if (!mergedData) return new Map<string, Record<string, number>>()
+    const idx = new Map<string, Record<string, number>>()
+    for (const l of mergedData.shipmentLines) {
+      if (!idx.has(l.itemNumber)) idx.set(l.itemNumber, {})
+      const m = idx.get(l.itemNumber)!
+      m[l.date] = (m[l.date] ?? 0) + l.qty
+    }
+    return idx
+  }, [mergedData])
+
+  // Actual past received deliveries per item per date (for backward reconstruction)
+  const receivedIdx = useMemo(() => {
+    if (!mergedData) return new Map<string, Record<string, number>>()
+    const idx = new Map<string, Record<string, number>>()
+    for (const l of mergedData.receivedLines) {
+      if (!idx.has(l.itemNumber)) idx.set(l.itemNumber, {})
+      const m = idx.get(l.itemNumber)!
+      m[l.date] = (m[l.date] ?? 0) + l.qty
+    }
     return idx
   }, [mergedData])
 
   // ── Forecast per item ───────────────────────────────────────────────────────
-  // stock_quantity = physical stock NOW (today). We reconstruct what the stock
-  // "should have been" on past dates by reversing any overdue open-order movements,
-  // then project forward. This way today's column always equals stock_quantity.
+  // Past dates: reconstruct backwards using actual shipments and receipts
+  //   stock_on_date = stock_today + shipped_after_date - received_after_date
+  // Future dates: project forward using open orders and purchases
 
   const forecasts = useMemo(() => {
     return filteredItems.map((item) => {
       const movements = movIdx.get(item.number) ?? {}
+      const shipped   = shipmentIdx.get(item.number) ?? {}
+      const received  = receivedIdx.get(item.number) ?? {}
 
-      // Reverse past movements to get the starting stock at dates[0]
-      let startStock = item.stock_quantity
-      for (let i = 0; i < todayIdx; i++) {
-        const m = movements[dates[i]]
-        if (m) startStock = startStock + m.out - m.in
+      const values: number[] = new Array(dates.length)
+
+      // Backward reconstruction for past dates (0..todayIdx)
+      let cumShipped = 0
+      let cumReceived = 0
+      for (let i = todayIdx; i >= 0; i--) {
+        values[i] = item.stock_quantity + cumShipped - cumReceived
+        cumShipped  += shipped[dates[i]]  ?? 0
+        cumReceived += received[dates[i]] ?? 0
       }
 
-      // Apply all movements forward from dates[0]
-      let running = startStock
-      const values = dates.map((date) => {
-        const m = movements[date]
+      // Forward projection for future dates (todayIdx+1..end)
+      let running = item.stock_quantity
+      for (let i = todayIdx + 1; i < dates.length; i++) {
+        const m = movements[dates[i]]
         if (m) running = running + m.in - m.out
-        return running
-      })
+        values[i] = running
+      }
 
       return { item, values, minValue: Math.min(...values), maxValue: Math.max(...values) }
     })
-  }, [filteredItems, movIdx, dates, todayIdx])
+  }, [filteredItems, movIdx, shipmentIdx, receivedIdx, dates, todayIdx])
 
   // Sort: items that go negative first, then by group → name
   const sorted = useMemo(() => {
@@ -207,18 +263,38 @@ export default function InventoryForecast() {
     })
   }, [forecasts])
 
-  // ── Forecast adjustments: expected unconfirmed sales per item per date ──────
+  // ── Friday stock values ─────────────────────────────────────────────────────
+
+  const fridayValues = useMemo(() => {
+    const map = new Map<string, number[]>()
+    for (const { item, values } of sorted) {
+      const daily    = salesData?.dailySales[item.number]    ?? {}
+      const rcvd     = salesData?.dailyReceived[item.number] ?? {}
+      const friVals  = fridayDates.map((friday) => {
+        const idx = dates.indexOf(friday)
+        if (idx >= 0) return values[idx]
+        let stock = item.stock_quantity
+        for (const [d, qty] of Object.entries(daily)) if (d > friday) stock += qty
+        for (const [d, qty] of Object.entries(rcvd))  if (d > friday) stock -= qty
+        return Math.round(stock)
+      })
+      map.set(item.number, friVals)
+    }
+    return map
+  }, [salesData, sorted, fridayDates, dates])
+
+  // ── Sales forecast adjustments ──────────────────────────────────────────────
 
   const forecastAdjustments = useMemo(() => {
-    if (!forecastOn || !salesAvg) return new Map<string, (number | null)[]>()
+    if (!forecastOn || !salesData) return new Map<string, (number | null)[]>()
     const map = new Map<string, (number | null)[]>()
     for (const item of filteredItems) {
-      const avg = salesAvg[item.number]
+      const avg       = salesData.salesAvg[item.number]
       const movements = movIdx.get(item.number) ?? {}
       let cumExtra = 0
       const extras = dates.map((date, i) => {
         if (i < todayIdx + 3) return null
-        const wd = new Date(date + 'T00:00:00').getDay()
+        const wd       = new Date(date + 'T00:00:00').getDay()
         const expected = avg?.[wd] ?? 0
         const confirmed = movements[date]?.out ?? 0
         cumExtra += Math.max(0, expected - confirmed)
@@ -227,7 +303,7 @@ export default function InventoryForecast() {
       map.set(item.number, extras)
     }
     return map
-  }, [forecastOn, salesAvg, filteredItems, movIdx, dates, todayIdx])
+  }, [forecastOn, salesData, filteredItems, movIdx, dates, todayIdx])
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
@@ -285,17 +361,26 @@ export default function InventoryForecast() {
               />
             </div>
             <div className="flex flex-col gap-1">
+              <label className="text-xs font-medium text-[#a89070] uppercase tracking-wide">Lageroptælling</label>
+              <input
+                type="date"
+                value={countDate}
+                onChange={(e) => setCountDate(e.target.value)}
+                className="rounded-lg border border-[#3d3020] bg-[#1a1410] px-3 py-[7px] text-sm text-[#c8b090] focus:outline-none focus:border-amber-500 [color-scheme:dark]"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
               <label className="text-xs font-medium text-[#a89070] uppercase tracking-wide">Salgsforecast</label>
               <button
-                onClick={toggleForecast}
-                disabled={forecastLoading}
+                onClick={() => setForecastOn((v) => !v)}
+                disabled={salesLoading}
                 className={`rounded-lg px-4 py-[7px] text-sm font-semibold transition-colors disabled:opacity-50 ${
                   forecastOn
                     ? 'bg-blue-600 text-white hover:bg-blue-500'
                     : 'border border-[#3d3020] bg-[#1a1410] text-[#a89070] hover:text-[#c8b090]'
                 }`}
               >
-                {forecastLoading ? 'Henter...' : forecastOn ? 'Til' : 'Fra'}
+                {salesLoading ? 'Henter...' : forecastOn ? 'Til' : 'Fra'}
               </button>
             </div>
             <button
@@ -326,6 +411,16 @@ export default function InventoryForecast() {
             <span className="inline-block w-3 h-3 rounded-sm bg-[#2B2318] border border-[#C8A96E]/40" />
             I dag
           </span>
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block w-3 h-3 rounded-sm bg-emerald-900/20 border border-emerald-700/50" />
+            Fredag slutlager
+          </span>
+          {countDate && (
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block w-3 h-3 rounded-sm bg-amber-900/30 border border-amber-600/50" />
+              Før optælling (usikkert)
+            </span>
+          )}
         </div>
 
         {error && (
@@ -341,10 +436,11 @@ export default function InventoryForecast() {
             <div className="overflow-x-auto">
               <table
                 className="text-xs border-collapse bg-[#2B2318]"
-                style={{ tableLayout: 'fixed', width: `${COL_ITEM + dates.length * COL_DATE}px` }}
+                style={{ tableLayout: 'fixed', width: `${COL_ITEM + (fridayDates.length + dates.length) * COL_DATE}px` }}
               >
                 <colgroup>
                   <col style={{ width: `${COL_ITEM}px` }} />
+                  {fridayDates.map((d) => <col key={`fri-${d}`} style={{ width: `${COL_DATE}px` }} />)}
                   {dates.map((d) => <col key={d} style={{ width: `${COL_DATE}px` }} />)}
                 </colgroup>
 
@@ -353,23 +449,51 @@ export default function InventoryForecast() {
                     <th className="sticky left-0 z-20 bg-[#2B2318] px-3 py-2 text-left text-[#a89070] font-medium">
                       Vare ({sorted.length})
                     </th>
+
+                    {/* Friday reference columns */}
+                    {fridayDates.map((date, fi) => {
+                      const { day, num } = fmtHeader(date)
+                      const isLast = fi === fridayDates.length - 1
+                      const beforeCount = countDate !== '' && date < countDate
+                      return (
+                        <th
+                          key={`fri-${date}`}
+                          className={`py-1.5 text-center font-medium leading-tight ${
+                            beforeCount
+                              ? 'text-[#5a4535] bg-amber-900/15'
+                              : 'text-emerald-400/80 bg-emerald-900/15'
+                          } ${isLast ? 'border-r-2 border-r-[#C8A96E]/40' : ''}`}
+                        >
+                          <div className="text-[10px]">{day}</div>
+                          <div>{num}</div>
+                        </th>
+                      )
+                    })}
+
+                    {/* Regular date columns */}
                     {dates.map((date) => {
                       const { day, num } = fmtHeader(date)
-                      const isToday = date === today
-                      const isFocus = focusDate !== '' && date === focusDate
-                      const weekend = isWeekend(date)
+                      const isToday     = date === today
+                      const isFocus     = focusDate !== '' && date === focusDate
+                      const isCount     = countDate !== '' && date === countDate
+                      const beforeCount = countDate !== '' && date < countDate
+                      const weekend     = isWeekend(date)
                       return (
                         <th
                           key={date}
                           className={`py-1.5 text-center font-medium leading-tight ${
                             isToday
                               ? 'text-[#C8A96E] bg-[#C8A96E]/10 border-l-2 border-l-white/70 border-r-2 border-r-white/70'
+                              : isCount
+                              ? 'text-amber-300 bg-amber-900/25 border-l-2 border-l-amber-400/80 border-r-2 border-r-amber-400/80'
                               : isFocus
                               ? 'text-blue-300 bg-blue-900/20 border-l-2 border-l-blue-400/80 border-r-2 border-r-blue-400/80'
+                              : beforeCount
+                              ? 'text-[#5a4535] bg-amber-900/10'
                               : weekend
                               ? 'text-[#5a4535]'
                               : 'text-[#a89070]'
-                          }${isFocus && isToday ? ' border-l-blue-400/80 border-r-blue-400/80' : ''}`}
+                          }`}
                         >
                           <div className="text-[10px]">{day}</div>
                           <div>{num}</div>
@@ -392,35 +516,80 @@ export default function InventoryForecast() {
                         </div>
                       </td>
 
-                      {/* Date cells */}
+                      {/* Friday reference cells */}
+                      {fridayDates.map((friday, fi) => {
+                        const friVal      = fridayValues.get(item.number)?.[fi]
+                        const isLast      = fi === fridayDates.length - 1
+                        const beforeCount = countDate !== '' && friday < countDate
+                        return (
+                          <td
+                            key={`fri-${friday}`}
+                            className={`py-1.5 text-center tabular-nums ${
+                              beforeCount ? 'bg-amber-900/15' : 'bg-emerald-900/15'
+                            } ${isLast ? 'border-r-2 border-r-[#C8A96E]/40' : ''} group-hover:brightness-110`}
+                            style={{ color: friVal !== undefined && !beforeCount ? heatColor(friVal, maxValue) : undefined }}
+                          >
+                            {salesLoading ? (
+                              <div className="leading-none text-[#5a4535]">·</div>
+                            ) : beforeCount ? (
+                              <div className="leading-none text-[#5a4535]">?</div>
+                            ) : friVal !== undefined ? (
+                              <div className="leading-none">{friVal}</div>
+                            ) : (
+                              <div className="leading-none text-[#5a4535]">—</div>
+                            )}
+                          </td>
+                        )
+                      })}
+
+                      {/* Regular date cells */}
                       {values.map((value, i) => {
-                        const date = dates[i]
-                        const isToday = date === today
-                        const isFocus = focusDate !== '' && date === focusDate
-                        const weekend = isWeekend(date)
-                        const hasIncoming = (movIdx.get(item.number)?.[date]?.in ?? 0) > 0
-                        const extra = forecastOn ? (forecastAdjustments.get(item.number)?.[i] ?? null) : null
+                        const date        = dates[i]
+                        const isToday     = date === today
+                        const isFocus     = focusDate !== '' && date === focusDate
+                        const isCount     = countDate !== '' && date === countDate
+                        const beforeCount = countDate !== '' && date < countDate
+                        const weekend     = isWeekend(date)
+                        const hasIncoming = date >= today
+                          ? (movIdx.get(item.number)?.[date]?.in ?? 0) > 0
+                          : (receivedIdx.get(item.number)?.[date] ?? 0) > 0
+                        const extra        = forecastOn ? (forecastAdjustments.get(item.number)?.[i] ?? null) : null
                         const forecastValue = extra !== null && extra > 0 ? Math.round(value - extra) : null
                         return (
                           <td
                             key={date}
                             className={`py-1.5 text-center tabular-nums transition-colors ${
-                              value < 0 ? 'bg-red-900/50 font-semibold' : hasIncoming ? 'bg-green-900/50' : ''
+                              beforeCount
+                                ? 'bg-amber-900/10'
+                                : value < 0
+                                ? 'bg-red-900/50 font-semibold'
+                                : hasIncoming
+                                ? 'bg-green-900/50'
+                                : ''
                             } ${
-                              isToday ? 'bg-[#C8A96E]/8 border-l-2 border-l-white/70 border-r-2 border-r-white/70' : weekend ? 'bg-[#1f1a15]' : ''
+                              isToday ? 'bg-[#C8A96E]/8 border-l-2 border-l-white/70 border-r-2 border-r-white/70'
+                              : isCount ? 'bg-amber-900/20 border-l-2 border-l-amber-400/80 border-r-2 border-r-amber-400/80'
+                              : weekend ? 'bg-[#1f1a15]'
+                              : ''
                             } ${
                               isFocus ? 'border-l-2 border-l-blue-400/80 border-r-2 border-r-blue-400/80' : ''
                             } group-hover:brightness-110`}
-                            style={{ color: heatColor(value, maxValue) }}
+                            style={{ color: beforeCount ? '#5a4535' : heatColor(value, maxValue) }}
                           >
-                            <div className="leading-none">{value}</div>
-                            {forecastValue !== null && (
-                              <div
-                                className="text-[9px] leading-none mt-0.5 opacity-75"
-                                style={{ color: heatColor(forecastValue, maxValue) }}
-                              >
-                                ({forecastValue})
-                              </div>
+                            {beforeCount ? (
+                              <div className="leading-none">?</div>
+                            ) : (
+                              <>
+                                <div className="leading-none">{value}</div>
+                                {forecastValue !== null && (
+                                  <div
+                                    className="text-[9px] leading-none mt-0.5 opacity-75"
+                                    style={{ color: heatColor(forecastValue, maxValue) }}
+                                  >
+                                    ({forecastValue})
+                                  </div>
+                                )}
+                              </>
                             )}
                           </td>
                         )
