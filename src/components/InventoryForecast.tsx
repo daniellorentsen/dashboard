@@ -152,7 +152,10 @@ export default function InventoryForecast() {
   const groups = useMemo(() => {
     if (!mergedData) return []
     const s = new Set<string>()
-    for (const item of mergedData.items) if (item.group?.name) s.add(item.group.name)
+    for (const item of mergedData.items) {
+      const name = item.group?.name
+      if (name && !name.startsWith('(DD)')) s.add(name)
+    }
     return Array.from(s).sort()
   }, [mergedData])
 
@@ -171,6 +174,7 @@ export default function InventoryForecast() {
   const filteredItems = useMemo(() => {
     if (!mergedData) return []
     return mergedData.items.filter((item) => {
+      if (item.group?.name?.startsWith('(DD)')) return false
       if (groupFilter.length > 0 && !groupFilter.includes(item.group?.name ?? '')) return false
       if (itemFilter.length > 0 && !itemFilter.includes(item.number)) return false
       return true
