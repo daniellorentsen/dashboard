@@ -13,15 +13,24 @@ type Props = {
 
 export default function MultiSelect({ options, value, onChange, placeholder = 'Alle' }: Props) {
   const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
   const ref = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false)
+        setSearch('')
+      }
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [])
+
+  useEffect(() => {
+    if (open) setTimeout(() => inputRef.current?.focus(), 0)
+  }, [open])
 
   function toggle(opt: string) {
     if (value.includes(opt)) {
@@ -30,6 +39,10 @@ export default function MultiSelect({ options, value, onChange, placeholder = 'A
       onChange([...value, opt])
     }
   }
+
+  const filtered = search.trim()
+    ? options.filter((o) => o.label.toLowerCase().includes(search.toLowerCase()))
+    : options
 
   const label =
     value.length === 0
@@ -55,36 +68,48 @@ export default function MultiSelect({ options, value, onChange, placeholder = 'A
       </button>
 
       {open && (
-        <div className="absolute left-0 z-50 mt-1 max-h-64 min-w-full overflow-y-auto rounded-lg border border-[#3d3020] bg-[#1a1410] shadow-xl">
-          {options.length === 0 ? (
-            <div className="px-3 py-2 text-xs text-[#a89070]">Ingen muligheder</div>
-          ) : (
-            <>
-              {value.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => onChange([])}
-                  className="w-full px-3 py-2 text-left text-xs text-[#C8A96E] hover:bg-[#3d3020] border-b border-[#3d3020]"
-                >
-                  Ryd valg
-                </button>
-              )}
-              {options.map((opt) => (
-                <label
-                  key={opt.value}
-                  className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm text-white hover:bg-[#3d3020]"
-                >
-                  <input
-                    type="checkbox"
-                    checked={value.includes(opt.value)}
-                    onChange={() => toggle(opt.value)}
-                    className="accent-[#C8A96E]"
-                  />
-                  <span className="truncate">{opt.label}</span>
-                </label>
-              ))}
-            </>
-          )}
+        <div className="absolute left-0 z-50 mt-1 min-w-full rounded-lg border border-[#3d3020] bg-[#1a1410] shadow-xl">
+          <div className="p-2 border-b border-[#3d3020]">
+            <input
+              ref={inputRef}
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Søg..."
+              className="w-full rounded-md border border-[#3d3020] bg-[#2B2318] px-2 py-1.5 text-sm text-white placeholder-[#a89070] focus:outline-none focus:border-[#C8A96E]"
+            />
+          </div>
+          <div className="max-h-60 overflow-y-auto">
+            {filtered.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-[#a89070]">Ingen resultater</div>
+            ) : (
+              <>
+                {value.length > 0 && !search && (
+                  <button
+                    type="button"
+                    onClick={() => onChange([])}
+                    className="w-full px-3 py-2 text-left text-xs text-[#C8A96E] hover:bg-[#3d3020] border-b border-[#3d3020]"
+                  >
+                    Ryd valg
+                  </button>
+                )}
+                {filtered.map((opt) => (
+                  <label
+                    key={opt.value}
+                    className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm text-white hover:bg-[#3d3020]"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={value.includes(opt.value)}
+                      onChange={() => toggle(opt.value)}
+                      className="accent-[#C8A96E]"
+                    />
+                    <span className="truncate">{opt.label}</span>
+                  </label>
+                ))}
+              </>
+            )}
+          </div>
         </div>
       )}
     </div>
