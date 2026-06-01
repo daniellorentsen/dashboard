@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
+import * as XLSX from 'xlsx'
 import type { Invoice, InvoiceLine } from '@/lib/rackbeat'
 import KPICard from './KPICard'
 import MultiSelect from './MultiSelect'
@@ -301,6 +302,55 @@ export default function Dashboard() {
 
   useEffect(() => { load() }, [])
 
+  // ─── Excel export ───────────────────────────────────────────────────────────
+
+  function exportToExcel() {
+    const wb = XLSX.utils.book_new()
+
+    // Sheet 1: Fakturaer
+    const invoiceRows = filtered.map((inv) => ({
+      'Fakturanr.': inv.number,
+      'Fakturadato': inv.invoice_date,
+      'Kunde': inv.customer?.name ?? '',
+      'Kundegruppe': inv.customer?.customer_group?.name ?? '',
+      'Valuta': inv.currency,
+      'Omsætning (DKK)': Math.round(inv.total_subtotal * (inv.currency_rate ?? 1)),
+      'Profit (DKK)': Math.round(inv.total_profit * (inv.currency_rate ?? 1)),
+      'DB%': inv.total_subtotal > 0
+        ? Math.round((inv.total_profit / inv.total_subtotal) * 1000) / 10
+        : 0,
+      'Kreditnota': inv.is_creditnote ? 'Ja' : 'Nej',
+    }))
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(invoiceRows), 'Fakturaer')
+
+    // Sheet 2: Varelinjer
+    const lineRows: object[] = []
+    for (const inv of filtered) {
+      const rate = inv.currency_rate ?? 1
+      for (const line of inv.lines ?? []) {
+        if (activeItemFilter && !lineMatchesItemFilter(line, itemGroupFilter, itemNumberFilter)) continue
+        lineRows.push({
+          'Fakturanr.': inv.number,
+          'Fakturadato': inv.invoice_date,
+          'Kunde': inv.customer?.name ?? '',
+          'Kundegruppe': inv.customer?.customer_group?.name ?? '',
+          'Varenr.': line.child_id ?? '',
+          'Varenavn': line.name ?? '',
+          'Varegruppe': line.item?.group?.name ?? '',
+          'Antal': line.quantity,
+          'Linjebeløb (DKK)': Math.round(line.line_total * rate),
+          'Kostpris pr. enhed': line.item_cost_price,
+          'Profit (DKK)': Math.round((line.line_total - line.quantity * line.item_cost_price) * rate),
+          'Rabat %': line.discount_percentage ?? 0,
+        })
+      }
+    }
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(lineRows), 'Varelinjer')
+
+    const filename = `salg_${from}_${to}.xlsx`
+    XLSX.writeFile(wb, filename)
+  }
+
   // ─── Render ─────────────────────────────────────────────────────────────────
 
   return (
@@ -394,6 +444,14 @@ export default function Dashboard() {
             >
               {loading ? 'Henter...' : 'Hent data'}
             </button>
+            {filtered.length > 0 && (
+              <button
+                onClick={exportToExcel}
+                className="rounded-lg border border-[#3d3020] bg-[#1a1410] px-5 py-2 text-sm font-semibold text-[#a89070] hover:text-[#C8A96E] hover:border-[#C8A96E] transition-colors"
+              >
+                Eksporter Excel
+              </button>
+            )}
           </div>
 
           {/* Active item filter notice */}
