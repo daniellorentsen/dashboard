@@ -63,20 +63,20 @@ function aggregateByInvoice(invoices: Invoice[], keyFn: (inv: Invoice) => string
   return toRows(map)
 }
 
-// Line-level aggregation (when item filters active)
+// Line-level aggregation (when item filters active, or when grouping by product)
 function aggregateByLine(
   invoices: Invoice[],
-  keyFn: (inv: Invoice) => string,
+  keyFn: (inv: Invoice, line: InvoiceLine) => string,
   itemGroups: string[],
   itemNumbers: string[],
 ): AggRow[] {
   const map = new Map<string, { omsætning: number; profit: number; enheder: number; invoiceNums: Set<number> }>()
   for (const inv of invoices) {
-    const key = keyFn(inv)
-    if (!key) continue
     const rate = inv.currency_rate ?? 1
     for (const line of inv.lines ?? []) {
       if (!lineMatchesItemFilter(line, itemGroups, itemNumbers)) continue
+      const key = keyFn(inv, line)
+      if (!key) continue
       const cur = map.get(key) ?? { omsætning: 0, profit: 0, enheder: 0, invoiceNums: new Set<number>() }
       const lineRevenue = line.line_total * rate
       const lineProfit = (line.line_total - line.quantity * line.item_cost_price) * rate
@@ -147,7 +147,7 @@ function byMonth(invoices: Invoice[], itemGroups: string[], itemNumbers: string[
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type GroupBy = 'customer' | 'customer_group' | 'none'
+type GroupBy = 'customer' | 'customer_group' | 'item' | 'none'
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -260,13 +260,19 @@ export default function Dashboard() {
   )
 
   const tableData = useMemo(() => {
+    if (groupBy === 'none') return []
+
+    if (groupBy === 'item') {
+      const lineKeyFn = (_inv: Invoice, line: InvoiceLine) => line.name ?? lineItemNumber(line) ?? 'Ukendt vare'
+      return aggregateByLine(filtered, lineKeyFn, itemGroupFilter, itemNumberFilter)
+    }
+
     const keyFn = groupBy === 'customer'
       ? (inv: Invoice) => inv.customer?.name ?? 'Ukendt'
       : (inv: Invoice) => inv.customer?.customer_group?.name ?? 'Ingen gruppe'
 
-    if (groupBy === 'none') return []
     return activeItemFilter
-      ? aggregateByLine(filtered, keyFn, itemGroupFilter, itemNumberFilter)
+      ? aggregateByLine(filtered, (inv) => keyFn(inv), itemGroupFilter, itemNumberFilter)
       : aggregateByInvoice(filtered, keyFn)
   }, [filtered, groupBy, itemGroupFilter, itemNumberFilter, activeItemFilter])
 
@@ -501,7 +507,7 @@ export default function Dashboard() {
         {/* Group by toggle + Table */}
         <div className="mb-3 flex items-center gap-2">
           <span className="text-xs font-medium text-[#a89070] uppercase tracking-wide">Gruppér efter:</span>
-          {(['customer', 'customer_group', 'none'] as GroupBy[]).map((g) => (
+          {(['customer', 'customer_group', 'item', 'none'] as GroupBy[]).map((g) => (
             <button
               key={g} onClick={() => setGroupBy(g)}
               className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
@@ -510,14 +516,14 @@ export default function Dashboard() {
                   : 'bg-[#2B2318] text-[#a89070] border border-[#3d3020] hover:border-[#C8A96E] hover:text-[#C8A96E]'
               }`}
             >
-              {g === 'customer' ? 'Kunde' : g === 'customer_group' ? 'Kundegruppe' : 'Ingen'}
+              {g === 'customer' ? 'Kunde' : g === 'customer_group' ? 'Kundegruppe' : g === 'item' ? 'Produkt' : 'Ingen'}
             </button>
           ))}
         </div>
 
         {groupBy !== 'none' && (
           <TopTable
-            title={groupBy === 'customer' ? 'Top kunder' : 'Top kundegrupper'}
+            title={groupBy === 'customer' ? 'Top kunder' : groupBy === 'customer_group' ? 'Top kundegrupper' : 'Top produkter'}
             rows={tableData}
           />
         )}
