@@ -1,9 +1,10 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import MultiSelect from './MultiSelect'
 import type { ItemStock } from '@/lib/rackbeat'
+import { categoryFor, compareCategories } from '@/lib/categories'
 
 type Movement = { itemNumber: string; date: string; qty: number }
 
@@ -57,6 +58,7 @@ function heatColor(value: number, max: number): string {
 
 export default function InventoryForecast() {
   const [data, setData] = useState<InventoryData | null>(null)
+  const [categories, setCategories] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [groupFilter, setGroupFilter] = useState<string[]>([])
@@ -96,9 +98,21 @@ export default function InventoryForecast() {
     }
   }
 
+  async function loadCategories() {
+    try {
+      const res = await fetch('/api/categories')
+      if (!res.ok) return
+      const json = await res.json()
+      setCategories(json.categories ?? {})
+    } catch {
+      // Categories are optional — items fall back to "Øvrige"
+    }
+  }
+
   useEffect(() => {
     load()
     loadSalesData()
+    loadCategories()
   }, [])
 
   // ── Last 3 Fridays not already in the main date window (oldest → newest) ────
@@ -159,15 +173,19 @@ export default function InventoryForecast() {
     return Array.from(s).sort()
   }, [mergedData])
 
+  // Exactly one group selected (via button or dropdown) → show items split into categories
+  const activeGroup = groupFilter.length === 1 ? groupFilter[0] : null
+  const effectiveGroups = groupFilter
+
   const itemOptions = useMemo(() => {
     if (!mergedData) return []
     const map = new Map<string, string>()
     for (const item of mergedData.items) {
-      if (groupFilter.length > 0 && !groupFilter.includes(item.group?.name ?? '')) continue
+      if (effectiveGroups.length > 0 && !effectiveGroups.includes(item.group?.name ?? '')) continue
       map.set(item.number, item.name)
     }
     return Array.from(map.entries()).sort(([, a], [, b]) => a.localeCompare(b))
-  }, [mergedData, groupFilter])
+  }, [mergedData, effectiveGroups])
 
   // ── Filtered items ──────────────────────────────────────────────────────────
 
@@ -175,11 +193,11 @@ export default function InventoryForecast() {
     if (!mergedData) return []
     return mergedData.items.filter((item) => {
       if (item.group?.name?.startsWith('(DD)')) return false
-      if (groupFilter.length > 0 && !groupFilter.includes(item.group?.name ?? '')) return false
+      if (effectiveGroups.length > 0 && !effectiveGroups.includes(item.group?.name ?? '')) return false
       if (itemFilter.length > 0 && !itemFilter.includes(item.number)) return false
       return true
     })
-  }, [mergedData, groupFilter, itemFilter])
+  }, [mergedData, effectiveGroups, itemFilter])
 
   // ── Movement indices ────────────────────────────────────────────────────────
 
@@ -256,16 +274,21 @@ export default function InventoryForecast() {
     })
   }, [filteredItems, movIdx, shipmentIdx, receivedIdx, dates, todayIdx])
 
-  // Sort: items that go negative first, then by group → name
+  // Sort: on group pages by category first; then items that go negative first, then by group → name
   const sorted = useMemo(() => {
+    const byCategory = activeGroup ? compareCategories(activeGroup) : null
     return [...forecasts].sort((a, b) => {
+      if (byCategory) {
+        const c = byCategory(categoryFor(categories, a.item.number), categoryFor(categories, b.item.number))
+        if (c !== 0) return c
+      }
       if (a.minValue < 0 && b.minValue >= 0) return -1
       if (b.minValue < 0 && a.minValue >= 0) return 1
       const ga = a.item.group?.name ?? ''
       const gb = b.item.group?.name ?? ''
       return ga !== gb ? ga.localeCompare(gb) : a.item.name.localeCompare(b.item.name)
     })
-  }, [forecasts])
+  }, [forecasts, activeGroup, categories])
 
   // ── Friday stock values ─────────────────────────────────────────────────────
 
@@ -401,6 +424,34 @@ export default function InventoryForecast() {
           </div>
         </div>
 
+        {/* Group buttons */}
+        {groups.length > 0 && (
+          <div className="mb-4 rounded-xl border border-[#3d3020] bg-[#2B2318] p-4">
+            <div className="mb-2 text-xs font-medium text-[#a89070] uppercase tracking-wide">Varegrupper</div>
+            <div className="flex flex-wrap gap-2">
+              {[{ label: 'Alle', value: [] as string[], active: groupFilter.length === 0 }, ...groups.map((g) => ({
+                label: g,
+                value: [g],
+                active: g === activeGroup,
+              }))].map(({ label, value, active }) => (
+                <button
+                  key={label}
+                  type="button"
+                  onClick={() => { setGroupFilter(value); setItemFilter([]) }}
+                  aria-pressed={active}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-semibold uppercase tracking-wide transition-colors ${
+                    active
+                      ? 'bg-blue-500 text-white ring-2 ring-blue-300/70 shadow-[0_0_12px_rgba(59,130,246,0.5)]'
+                      : 'border border-blue-700/60 bg-blue-950/40 text-blue-300 hover:bg-blue-900/60 hover:text-blue-200'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Legend */}
         <div className="mb-3 flex items-center gap-5 text-xs text-[#a89070]">
           <span className="flex items-center gap-1.5">
@@ -508,8 +559,25 @@ export default function InventoryForecast() {
                 </thead>
 
                 <tbody>
-                  {sorted.map(({ item, values, maxValue }) => (
-                    <tr key={item.number} className="group border-b border-[#3d3020] last:border-0">
+                  {sorted.map(({ item, values, maxValue }, rowIdx) => {
+                    const category = activeGroup ? categoryFor(categories, item.number) : null
+                    const prevCategory = activeGroup && rowIdx > 0 ? categoryFor(categories, sorted[rowIdx - 1].item.number) : null
+                    const showCategoryHeader = category !== null && category !== prevCategory
+                    const categoryCount = showCategoryHeader
+                      ? sorted.filter((f) => categoryFor(categories, f.item.number) === category).length
+                      : 0
+                    return (
+                    <Fragment key={item.number}>
+                    {showCategoryHeader && (
+                      <tr className="border-b border-[#3d3020] bg-[#231c14]">
+                        <td className="sticky left-0 z-10 bg-[#231c14] px-3 pt-3 pb-1.5 whitespace-nowrap">
+                          <span className="text-[11px] font-semibold uppercase tracking-wider text-blue-300">{category}</span>
+                          <span className="ml-1.5 text-[10px] text-[#a89070]">({categoryCount})</span>
+                        </td>
+                        <td colSpan={fridayDates.length + dates.length} />
+                      </tr>
+                    )}
+                    <tr className="group border-b border-[#3d3020] last:border-0">
                       {/* Sticky item column */}
                       <td className="sticky left-0 z-10 bg-[#2B2318] group-hover:bg-[#3d3020] px-3 py-1.5 transition-colors">
                         <div className="font-semibold text-[#C8A96E] truncate leading-tight" title={item.number}>
@@ -599,7 +667,9 @@ export default function InventoryForecast() {
                         )
                       })}
                     </tr>
-                  ))}
+                    </Fragment>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
